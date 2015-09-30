@@ -2,13 +2,15 @@ package main
 
 import (
 	"bytes"
-	"regexp"
 
 	"flag"
 	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"unicode"
+
+	"runtime/pprof"
 )
 
 type Converter struct {
@@ -30,60 +32,64 @@ func (c *Converter) atEof() bool {
 }
 
 // Returns the character at the given cursor
-func (c *Converter) at(cursor int) string {
-	return string(c.in[cursor])
+func (c *Converter) at(cursor int) rune {
+	return c.in[cursor]
 }
 
 // Returns the character at the cursor
-func (c *Converter) current() string {
-	return string(c.in[c.cursor])
+func (c *Converter) current() rune {
+	return c.in[c.cursor]
 }
 
 // Returns the next character after the cursor
-func (c *Converter) next() string {
-	return string(c.in[c.cursor+1])
+func (c *Converter) next() rune {
+	return c.in[c.cursor+1]
 }
 
 // Returns the next character after the cursor
-func (c *Converter) prev() string {
-	return string(c.in[c.cursor-1])
+func (c *Converter) prev() rune {
+	return c.in[c.cursor-1]
 }
 
 // Returns the next |n| characters after the cursor (i.e. excluding "current()")
-func (c *Converter) lookahead(n int) string {
-	return string(c.in[c.cursor+1 : c.cursor+1+n])
+func (c *Converter) lookahead(n int) []rune {
+	return c.in[c.cursor+1 : c.cursor+1+n]
 }
 
 // Same as "lookahead" with a given cursor
-func (c *Converter) lookaheadAt(n int, cursor int) string {
-	return string(c.in[cursor+1 : cursor+1+n])
+func (c *Converter) lookaheadAt(n int, cursor int) []rune {
+	return c.in[cursor+1 : cursor+1+n]
 }
 
 // Returns the previous |n| characters before the cursor (i.e. excluding "current()")
-func (c *Converter) lookback(n int) string {
-	return string(c.in[c.cursor-n : c.cursor])
+func (c *Converter) lookback(n int) []rune {
+	return c.in[c.cursor-n : c.cursor]
 }
 
 /* Methods that operate on the output */
 
 // Writes a string to the output buffer
-func (c *Converter) emit(s string) {
-	c.out.WriteString(s)
+func (c *Converter) emit(s []rune) {
+	c.out.WriteString(string(s))
+}
+
+func (c *Converter) emitRune(s rune) {
+	c.out.WriteRune(s)
 }
 
 /* Parsing \o/ */
 
 // Everything inside an HTML comment is considered to be Latex and thus emitted 1:1
 func (c *Converter) handleComments() bool {
-	if c.current() != "<" || c.lookahead(3) != "!--" {
+	if c.current() != '<' || !eq(c.lookahead(3), []rune("!--")) {
 		return false
 	}
 
-	for !c.atEof() && (c.current() != "-" || c.lookahead(2) != "->") {
-		c.emit(c.current())
+	for !c.atEof() && (c.current() != '-' || !eq(c.lookahead(2), []rune("->"))) {
+		c.emitRune(c.current())
 		c.cursor += 1
 	}
-	c.emit("-->")
+	c.emit([]rune("-->"))
 	c.cursor += 3
 
 	return true
@@ -91,11 +97,11 @@ func (c *Converter) handleComments() bool {
 
 // CDATA blocks are comments which are completely dropped from the output
 func (c *Converter) handleCDATA() bool {
-	if c.current() != "<" || c.lookahead(8) != "![CDATA[" {
+	if c.current() != '<' || !eq(c.lookahead(8), []rune("![CDATA[")) {
 		return false
 	}
 
-	for !c.atEof() && (c.current() != "]" || c.lookahead(2) != "]>") {
+	for !c.atEof() && (c.current() != ']' || !eq(c.lookahead(2), []rune("]>"))) {
 		c.cursor += 1
 	}
 	c.cursor += 3 // For ]]>
@@ -104,8 +110,8 @@ func (c *Converter) handleCDATA() bool {
 }
 
 func (c *Converter) handleLatex() bool {
-	if !c.inInlineMath && c.current() == "\\" && c.next() != "\\" {
-		if c.lookahead(5) == "begin" {
+	if !c.inInlineMath && c.current() == '\\' && c.next() != '\\' {
+		if eq(c.lookahead(5), []rune("begin")) {
 			c.handleLatexBlock()
 		} else {
 			c.handleLatexCommand(true)
@@ -116,19 +122,17 @@ func (c *Converter) handleLatex() bool {
 }
 
 func (c *Converter) handleLatexCommand(emitCommentBlock bool) {
-	spaceRegexp := regexp.MustCompile("\\s")
-
 	if emitCommentBlock {
-		c.emit("<!--")
+		c.emit([]rune("<!--"))
 	}
 
 	// The command name
 	for !c.atEof() &&
-		c.current() != "{" &&
-		c.current() != "[" &&
-		!spaceRegexp.MatchString(c.current()) {
+		c.current() != '{' &&
+		c.current() != '[' &&
+		!unicode.IsSpace(c.current()) {
 
-		c.emit(c.current())
+		c.emitRune(c.current())
 		c.cursor += 1
 	}
 
@@ -137,28 +141,40 @@ func (c *Converter) handleLatexCommand(emitCommentBlock bool) {
 		// All parameters are closed and there is no next parameter,
 		// i.e. \foo{bar}{baz} test 123
 		//                    ^
-		if nesting == 0 && c.current() != "{" && c.current() != "[" {
+		if nesting == 0 && c.current() != '{' && c.current() != '[' {
 			break
 		}
 
 		// This will break if there's an unbalanced number of different
 		// brace types, i.e. "[[]}" will result in nesting = 0. Don't care
 		// to fix that right now.
-		if c.current() == "{" || c.current() == "[" {
+		if c.current() == '{' || c.current() == '[' {
 			nesting += 1
 		}
 
-		if c.current() == "}" || c.current() == "]" {
+		if c.current() == '}' || c.current() == ']' {
 			nesting -= 1
 		}
 
-		c.emit(c.current())
+		c.emitRune(c.current())
 		c.cursor += 1
 	}
 
 	if emitCommentBlock {
-		c.emit("-->")
+		c.emit([]rune("-->"))
 	}
+}
+
+func eq(a,b []rune) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i, v := range a {
+		if v != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // Handles (nested) \begin{} ... \end{} blocks. Does not care wether you're
@@ -167,13 +183,13 @@ func (c *Converter) handleLatexCommand(emitCommentBlock bool) {
 //      \begin{figure} ... \end{math}
 //
 func (c *Converter) handleLatexBlock() {
-	c.emit("<!--")
+	c.emit([]rune("<!--"))
 	nesting := 0
 
 	for !c.atEof() {
-		if c.current() == "\\" && c.lookahead(5) == "begin" {
+		if c.current() == '\\' && eq(c.lookahead(5), []rune("begin")) {
 			nesting += 1
-		} else if c.current() == "\\" && c.lookahead(3) == "end" {
+		} else if c.current() == '\\' && eq(c.lookahead(3), []rune("end")) {
 			nesting -= 1
 		}
 
@@ -186,23 +202,23 @@ func (c *Converter) handleLatexBlock() {
 		// "}" and then return.
 		if nesting == 0 {
 			c.handleLatexCommand(false)
-			c.emit("-->")
+			c.emit([]rune("-->"))
 			break
 		}
 
-		c.emit(c.current())
+		c.emitRune(c.current())
 		c.cursor += 1
 	}
 }
 
 func (c *Converter) handleInlineMath() bool {
-	if c.current() == "\\" && c.next() == "$" {
-		c.emit("\\$")
+	if c.current() == '\\' && c.next() == '$' {
+		c.emit([]rune("\\$"))
 		c.cursor += 2
 		return true
 	}
 
-	if c.current() != "$" {
+	if c.current() != '$' {
 		return false
 	}
 
@@ -210,9 +226,9 @@ func (c *Converter) handleInlineMath() bool {
 	// In order to be correctly parsed as math, there must not be any space
 	// between the $ and the actual math on the inside of the delimiter, and
 	// there must be space on the outside.
-	if c.cursor > 0 && string(c.in[c.cursor-1]) == " " && !c.inInlineMath {
+	if c.cursor > 0 && c.in[c.cursor-1] == ' ' && !c.inInlineMath {
 		c.inInlineMath = true
-	} else if c.lookahead(1) == " " && c.inInlineMath {
+	} else if c.lookahead(1)[0] == ' ' && c.inInlineMath {
 		c.inInlineMath = false
 	}
 
@@ -238,7 +254,7 @@ func (c *Converter) Convert() []byte {
 			continue
 		}
 
-		c.emit(c.current())
+		c.emitRune(c.current())
 		c.cursor += 1
 	}
 
@@ -248,13 +264,15 @@ func (c *Converter) Convert() []byte {
 /* Utility */
 
 func ByteArrayToConverter(in []byte) Converter {
-	runes := []rune(string(in))
-	return Converter{
-		inputLength: len(runes),
+	c := Converter{
 		cursor:      0,
-		in:          runes,
+		in:          bytes.Runes(in),
 		out:         new(bytes.Buffer),
 	}
+
+	c.inputLength = len(c.in)
+
+	return c
 }
 
 func SXMD(in []byte) []byte {
@@ -262,11 +280,22 @@ func SXMD(in []byte) []byte {
 	return c.Convert()
 }
 
+var flag_cpuProfile = flag.String("cpuprofile", "", "lol")
+
 func main() {
 	flag.Parse()
 	if len(flag.Args()) != 1 {
 		fmt.Printf("Usage: %s <file-to-convert>\n", filepath.Base(os.Args[0]))
 		os.Exit(1)
+	}
+
+	if *flag_cpuProfile != "" {
+		f, err := os.Create(*flag_cpuProfile)
+        if err != nil {
+            panic(err)
+        }
+        pprof.StartCPUProfile(f)
+        defer pprof.StopCPUProfile()
 	}
 
 	inputFilePath := flag.Arg(0)
