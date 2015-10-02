@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 
 	"flag"
 	"fmt"
@@ -20,8 +19,8 @@ type Converter struct {
 
 	inInlineMath bool
 
-	in  []rune
-	out *bytes.Buffer
+	in  []byte
+	out []byte
 }
 
 /* Methods that operate on the input */
@@ -32,64 +31,64 @@ func (c *Converter) atEof() bool {
 }
 
 // Returns the character at the given cursor
-func (c *Converter) at(cursor int) rune {
+func (c *Converter) at(cursor int) byte {
 	return c.in[cursor]
 }
 
 // Returns the character at the cursor
-func (c *Converter) current() rune {
+func (c *Converter) current() byte {
 	return c.in[c.cursor]
 }
 
 // Returns the next character after the cursor
-func (c *Converter) next() rune {
+func (c *Converter) next() byte {
 	return c.in[c.cursor+1]
 }
 
 // Returns the next character after the cursor
-func (c *Converter) prev() rune {
+func (c *Converter) prev() byte {
 	return c.in[c.cursor-1]
 }
 
 // Returns the next |n| characters after the cursor (i.e. excluding "current()")
-func (c *Converter) lookahead(n int) []rune {
+func (c *Converter) lookahead(n int) []byte {
 	return c.in[c.cursor+1 : c.cursor+1+n]
 }
 
 // Same as "lookahead" with a given cursor
-func (c *Converter) lookaheadAt(n int, cursor int) []rune {
+func (c *Converter) lookaheadAt(n int, cursor int) []byte {
 	return c.in[cursor+1 : cursor+1+n]
 }
 
 // Returns the previous |n| characters before the cursor (i.e. excluding "current()")
-func (c *Converter) lookback(n int) []rune {
+func (c *Converter) lookback(n int) []byte {
 	return c.in[c.cursor-n : c.cursor]
 }
 
 /* Methods that operate on the output */
 
 // Writes a string to the output buffer
-func (c *Converter) emit(s []rune) {
-	c.out.WriteString(string(s))
+func (c *Converter) emit(s []byte) {
+	c.out = append(c.out, s...)
 }
 
-func (c *Converter) emitRune(s rune) {
-	c.out.WriteRune(s)
+func (c *Converter) emitByte(s byte) {
+	c.out = append(c.out, s)
 }
 
 /* Parsing \o/ */
 
 // Everything inside an HTML comment is considered to be Latex and thus emitted 1:1
 func (c *Converter) handleComments() bool {
-	if c.current() != '<' || !eq(c.lookahead(3), []rune("!--")) {
+	if c.current() != '<' || !eq(c.lookahead(3), []byte("!--")) {
 		return false
 	}
 
-	for !c.atEof() && (c.current() != '-' || !eq(c.lookahead(2), []rune("->"))) {
-		c.emitRune(c.current())
+	for !c.atEof() && (c.current() != '-' || !eq(c.lookahead(2), []byte("->"))) {
+		c.emitByte(c.current())
 		c.cursor += 1
 	}
-	c.emit([]rune("-->"))
+	c.emit([]byte("-->"))
 	c.cursor += 3
 
 	return true
@@ -97,11 +96,11 @@ func (c *Converter) handleComments() bool {
 
 // CDATA blocks are comments which are completely dropped from the output
 func (c *Converter) handleCDATA() bool {
-	if c.current() != '<' || !eq(c.lookahead(8), []rune("![CDATA[")) {
+	if c.current() != '<' || !eq(c.lookahead(8), []byte("![CDATA[")) {
 		return false
 	}
 
-	for !c.atEof() && (c.current() != ']' || !eq(c.lookahead(2), []rune("]>"))) {
+	for !c.atEof() && (c.current() != ']' || !eq(c.lookahead(2), []byte("]>"))) {
 		c.cursor += 1
 	}
 	c.cursor += 3 // For ]]>
@@ -111,7 +110,7 @@ func (c *Converter) handleCDATA() bool {
 
 func (c *Converter) handleLatex() bool {
 	if !c.inInlineMath && c.current() == '\\' && c.next() != '\\' {
-		if eq(c.lookahead(5), []rune("begin")) {
+		if eq(c.lookahead(5), []byte("begin")) {
 			c.handleLatexBlock()
 		} else {
 			c.handleLatexCommand(true)
@@ -123,16 +122,16 @@ func (c *Converter) handleLatex() bool {
 
 func (c *Converter) handleLatexCommand(emitCommentBlock bool) {
 	if emitCommentBlock {
-		c.emit([]rune("<!--"))
+		c.emit([]byte("<!--"))
 	}
 
 	// The command name
 	for !c.atEof() &&
 		c.current() != '{' &&
 		c.current() != '[' &&
-		!unicode.IsSpace(c.current()) {
+		!unicode.IsSpace(rune(c.current())) {
 
-		c.emitRune(c.current())
+		c.emitByte(c.current())
 		c.cursor += 1
 	}
 
@@ -156,16 +155,16 @@ func (c *Converter) handleLatexCommand(emitCommentBlock bool) {
 			nesting -= 1
 		}
 
-		c.emitRune(c.current())
+		c.emitByte(c.current())
 		c.cursor += 1
 	}
 
 	if emitCommentBlock {
-		c.emit([]rune("-->"))
+		c.emit([]byte("-->"))
 	}
 }
 
-func eq(a,b []rune) bool {
+func eq(a,b []byte) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -183,13 +182,13 @@ func eq(a,b []rune) bool {
 //      \begin{figure} ... \end{math}
 //
 func (c *Converter) handleLatexBlock() {
-	c.emit([]rune("<!--"))
+	c.emit([]byte("<!--"))
 	nesting := 0
 
 	for !c.atEof() {
-		if c.current() == '\\' && eq(c.lookahead(5), []rune("begin")) {
+		if c.current() == '\\' && eq(c.lookahead(5), []byte("begin")) {
 			nesting += 1
-		} else if c.current() == '\\' && eq(c.lookahead(3), []rune("end")) {
+		} else if c.current() == '\\' && eq(c.lookahead(3), []byte("end")) {
 			nesting -= 1
 		}
 
@@ -202,18 +201,18 @@ func (c *Converter) handleLatexBlock() {
 		// "}" and then return.
 		if nesting == 0 {
 			c.handleLatexCommand(false)
-			c.emit([]rune("-->"))
+			c.emit([]byte("-->"))
 			break
 		}
 
-		c.emitRune(c.current())
+		c.emitByte(c.current())
 		c.cursor += 1
 	}
 }
 
 func (c *Converter) handleInlineMath() bool {
 	if c.current() == '\\' && c.next() == '$' {
-		c.emit([]rune("\\$"))
+		c.emit([]byte("\\$"))
 		c.cursor += 2
 		return true
 	}
@@ -254,23 +253,22 @@ func (c *Converter) Convert() []byte {
 			continue
 		}
 
-		c.emitRune(c.current())
+		c.emitByte(c.current())
 		c.cursor += 1
 	}
 
-	return c.out.Bytes()
+	return c.out
 }
 
 /* Utility */
 
 func ByteArrayToConverter(in []byte) Converter {
 	c := Converter{
+		inputLength: len(in),
 		cursor:      0,
-		in:          bytes.Runes(in),
-		out:         new(bytes.Buffer),
+		in:          in,
+		out:         make([]byte, 0, len(in)),
 	}
-
-	c.inputLength = len(c.in)
 
 	return c
 }
